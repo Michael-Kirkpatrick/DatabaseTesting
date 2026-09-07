@@ -34,6 +34,12 @@ class IndexSpec:
 
 
 INDEX_SPECS = {
+    "id_lookup": IndexSpec(
+        "id_idx",
+        "Non-unique B-tree replacing the id-only primary-key access path on a hypertable",
+        "btree",
+        "(id)",
+    ),
     "group_order": IndexSpec(
         "group_id_id_idx", "B-tree for one-group pages ordered by id", "btree", "(group_id, id)"
     ),
@@ -157,10 +163,29 @@ def index_status(cursor: psycopg.Cursor[Any], table: str) -> list[dict[str, Any]
         """,
         (table,),
     )
-    return [
+    indexes = [
         {"name": name, "definition": definition, "bytes": size}
         for name, definition, size in cursor.fetchall()
     ]
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')")
+    if cursor.fetchone()[0]:
+        cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM timescaledb_information.hypertables
+                WHERE hypertable_schema = 'public' AND hypertable_name = %s
+            )
+            """,
+            (table,),
+        )
+        if cursor.fetchone()[0]:
+            for index in indexes:
+                cursor.execute(
+                    "SELECT hypertable_index_size(%s::regclass)",
+                    (f"public.{index['name']}",),
+                )
+                index["bytes"] = int(cursor.fetchone()[0])
+    return indexes
 
 
 def human_bytes(value: int) -> str:

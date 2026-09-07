@@ -19,6 +19,14 @@ mistake, but they do not make poor response times inevitable. Performance work
 should start with the exact SQL, plan, cardinality, and pages touched—not the
 database's total row count.
 
+An in-place TimescaleDB comparison reinforced the same lesson. Time-bounded
+queries that aligned with the chunk key improved, and some broad temporal
+counts benefited greatly from smaller local GiST indexes. However, ID-ordered
+active/overlap pages that took milliseconds on the ordinary table took two to
+four minutes on the hypertable because they could not prune historical chunks.
+TimescaleDB is a workload-specific architecture choice, not a blanket cure for
+date-query latency.
+
 ## Test context and limits
 
 - PostgreSQL 18.6 on Windows 11 using installation-default settings for the
@@ -50,6 +58,35 @@ queries, data distributions, write rates, and execution plans.
 | Search strategy depends on semantics | A trigram GIN reduced a rare substring count from 15.4 s to 141 ms, but cost 71% more space than the comparable current full-text GIN |
 | Memory has thresholds, not linear benefits | A one-percent full-text count took 81.9 s at 4 MiB `work_mem`, 48.4 s at 16 MiB, and 2.61 s once its bitmap became exact at 32 MiB |
 | Global planner tuning can backfire | Lower random-page costing helped selective queries but caused two broad counts to exceed the five-minute timeout |
+| Time partitioning is not a universal speedup | Timescale reduced an active exact count from 143.8 s to 715 ms, but increased its ID-ordered 100-row page from 3.67 ms to 227 s |
+
+## TimescaleDB decision guidance
+
+Use TimescaleDB when the important predicates, retention boundaries, and useful
+sort order align with the time partition key, or when its continuous aggregate,
+retention, compression/columnstore, and operational features are requirements
+in their own right. Do not introduce it solely because a table is large or a
+query mentions a date.
+
+In the controlled rowstore comparison, direct start-time predicates pruned to
+one or two chunks. ID, group, active-at, and overlap queries touched all 123
+chunks. Exact active and overlap counts improved by about 201x and 11x through
+smaller chunk-local GiST work, but the corresponding ID-ordered pages regressed
+from milliseconds to roughly 3.8 and 4.2 minutes. An ordinary ID lookup also
+became about 32x slower, though it remained only 5.85 ms.
+
+Before adopting time partitioning, inventory every important query's `WHERE`,
+`ORDER BY`, uniqueness requirements, and time semantics. In particular, an
+unbounded-duration active/overlap model cannot exclude old chunks just because
+their rows started earlier. Also account for the requirement that hypertable
+unique keys include the partition column: this experiment had to replace the
+global `PRIMARY KEY (id)` with a non-unique lookup index.
+
+The count gains demonstrate useful partition/index locality, not an exclusive
+Timescale capability; native PostgreSQL partitioning may provide similar
+rowstore behavior. The experiment did not test Timescale retention,
+compression/columnstore, or continuous aggregates, so it does not argue against
+those separate capabilities.
 
 ## Recommended action items
 

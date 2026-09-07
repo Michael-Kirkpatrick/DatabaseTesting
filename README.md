@@ -6,6 +6,8 @@ The team-facing conclusions and proposed actions are in
 [`results/SUMMARY_REPORT.md`](results/SUMMARY_REPORT.md). Detailed benchmark
 analysis remains in [`results/FINDINGS.md`](results/FINDINGS.md). To recreate
 the study at full or reduced scale, see [`REPRODUCING.md`](REPRODUCING.md).
+The controlled in-place TimescaleDB experiment is documented separately in
+[`TIMESCALE_COMPARISON.md`](TIMESCALE_COMPARISON.md).
 
 ## Billion-row baseline
 

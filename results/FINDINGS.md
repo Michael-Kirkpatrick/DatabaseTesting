@@ -687,6 +687,76 @@ I/O helps the bitmap workload but not sequential scanning. Any production
 change still needs a representative mixed-load test rather than isolated-query
 latency alone.
 
+## TimescaleDB in-place comparison
+
+The same one-billion-row `benchmark_rows` table was benchmarked as an ordinary
+PostgreSQL table and then converted in place to a TimescaleDB 2.29.2 hypertable
+partitioned into 123 thirty-day chunks on `start_at`. `timescaledb-tune` was not
+run. Both phases therefore used PostgreSQL 18.6 with the same 128 MiB
+`shared_buffers`, 4 GiB `effective_cache_size`, 4 MiB `work_mem`, data, query
+text, and logical indexes.
+
+The ordinary `PRIMARY KEY (id)` could not be retained because a hypertable's
+unique keys must contain its partition column. The post-conversion table used
+an equivalent non-unique B-tree on `id` for lookup performance. The generated
+IDs remained unique as data, but this is a real schema-semantics cost rather
+than a transparent optimization.
+
+| Query component | Ordinary table | Timescale hypertable | Change |
+|---|---:|---:|---:|
+| ID page | 0.18 ms | 5.85 ms | 32x slower |
+| Group page | 0.89 ms | 11.52 ms | 13x slower |
+| Group exact count | 364 ms | 1.14 s | 3.1x slower |
+| Start-time day page | 59.73 ms | 0.66 ms | 90x faster |
+| Start-time day count | 30.20 ms | 31.57 ms | No material change |
+| Start-time month page | 1.29 ms | 0.59 ms | 2.2x faster |
+| Start-time month count | 496 ms | 326 ms | 34% faster |
+| Active-at page, ordered by ID | 3.67 ms | 227.1 s | ~61,800x slower |
+| Active-at exact count | 143.8 s | 715 ms | ~201x faster |
+| Month-overlap page, ordered by ID | 1.84 ms | 254.5 s | ~138,600x slower |
+| Month-overlap exact count | 56.98 s | 5.02 s | 11.4x faster |
+| Group-active page | 455 ms | 560 ms | 23% slower |
+| Group-active exact count | 729 ms | 561 ms | 23% faster |
+| Group-overlap page, ordered by ID | 104 ms | 128.9 s | ~1,236x slower |
+| Group-overlap exact count | 2.82 s | 4.49 s | 59% slower |
+
+All eight result cardinalities matched exactly before and after conversion.
+The hypertable's table-plus-index size was 176.3 GiB, effectively identical to
+the ordinary relation; rowstore partitioning did not save space.
+
+Plan behavior explains why there is no single Timescale winner. Direct
+`start_at` bounds pruned the day query to one chunk and the month query to two.
+ID lookup, group, active-at, and overlap plans touched all 123 chunks. Point ID
+lookups therefore probed 123 local B-trees rather than one global B-tree.
+
+The ungrouped temporal counts benefited greatly from 123 smaller local GiST
+indexes and chunk-local bitmap work. In particular, the ordinary active count
+had visited millions of scattered heap pages at the default 4 MiB `work_mem`;
+the chunked form avoided that pathological global bitmap. This supports the
+value of partition and index locality, but it is not evidence that only
+Timescale can provide it: native PostgreSQL time partitioning could exhibit a
+similar benefit.
+
+The ID-ordered temporal pages demonstrate the opposite tradeoff. With no
+guaranteed maximum interval duration, an old chunk cannot be excluded merely
+because its rows started long before the requested instant or range: an old
+row could still have a late `end_at`. The hypertable walked or merged
+order-providing indexes across all 123 chunks. For active and overlap pages it
+spent minutes proving that older chunks contained no qualifying early IDs,
+while the ordinary global ID index stopped after finding the first 100 matches.
+One repeated overlap count-plus-page sample hit the five-minute timeout during
+the second page query; the other samples completed consistently near four
+minutes.
+
+The supported conclusion is narrow but useful: TimescaleDB is not a general
+repair for slow historical queries. It is effective when predicates and useful
+ordering align with the partition key, and its smaller local indexes can make
+broad counts much faster. It can simultaneously make unrelated global order,
+ID lookup, or predicates that cannot prune chunks substantially worse. These
+results do not evaluate Timescale-specific retention, compression/columnstore,
+continuous aggregates, or operational automation; those features may justify
+the extension for different requirements.
+
 ## Experiment backlog
 
 1. Compare single-column GiST, SP-GiST, and multicolumn group/range GiST for

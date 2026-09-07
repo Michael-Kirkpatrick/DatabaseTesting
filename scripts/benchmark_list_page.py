@@ -44,7 +44,7 @@ class Scenario:
 SCENARIOS = {
     "primary_key": Scenario(
         "primary_key",
-        "One row by primary key",
+        "One row by id (primary-key index before conversion; B-tree afterward)",
         "id = %s",
         (500_000_000,),
     ),
@@ -149,6 +149,14 @@ def parse_arguments() -> argparse.Namespace:
         help="Run the started-during-day and started-during-month scenarios.",
     )
     selection.add_argument(
+        "--timescale-suite",
+        action="store_true",
+        help=(
+            "Run the focused ordinary-table/hypertable comparison: ID lookup, "
+            "group, start-time, active-at, and overlap scenarios."
+        ),
+    )
+    selection.add_argument(
         "--unindexed-baseline",
         action="store_true",
         help=(
@@ -251,6 +259,61 @@ def table_metadata(cursor: psycopg.Cursor[Any], table: str) -> dict[str, Any]:
         {"name": name, "definition": definition, "bytes": size}
         for name, definition, size in cursor.fetchall()
     ]
+    cursor.execute(
+        "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+    )
+    extension_row = cursor.fetchone()
+    metadata["timescaledb_version"] = extension_row[0] if extension_row else None
+    metadata["is_hypertable"] = False
+    metadata["chunk_count"] = 0
+    if extension_row:
+        cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM timescaledb_information.hypertables
+                WHERE hypertable_schema = 'public' AND hypertable_name = %s
+            )
+            """,
+            (table,),
+        )
+        metadata["is_hypertable"] = bool(cursor.fetchone()[0])
+    if metadata["is_hypertable"]:
+        cursor.execute(
+            """
+            SELECT coalesce(sum(c.reltuples), 0)::bigint
+            FROM timescaledb_information.chunks ch
+            JOIN pg_namespace n ON n.nspname = ch.chunk_schema
+            JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = ch.chunk_name
+            WHERE ch.hypertable_schema = 'public' AND ch.hypertable_name = %s
+            """,
+            (table,),
+        )
+        metadata["estimated_rows"] = int(cursor.fetchone()[0])
+        cursor.execute(
+            """
+            SELECT table_bytes, index_bytes, toast_bytes, total_bytes
+            FROM hypertable_detailed_size(%s::regclass)
+            """,
+            (relation,),
+        )
+        size_row = cursor.fetchone()
+        if size_row:
+            metadata["hypertable_size"] = dict(
+                zip(
+                    ["table_bytes", "index_bytes", "toast_bytes", "total_bytes"],
+                    size_row,
+                    strict=True,
+                )
+            )
+        cursor.execute("SELECT count(*) FROM show_chunks(%s::regclass)", (relation,))
+        metadata["chunk_count"] = int(cursor.fetchone()[0])
+        for index in metadata["indexes"]:
+            cursor.execute(
+                "SELECT hypertable_index_size(%s::regclass)",
+                (f"public.{index['name']}",),
+            )
+            index["hypertable_bytes"] = int(cursor.fetchone()[0])
     return metadata
 
 
@@ -290,14 +353,31 @@ def explain(
     return document[0]
 
 
+def explain_safely(
+    cursor: psycopg.Cursor[Any], query: str, parameters: Sequence[Any]
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        return explain(cursor, query, parameters)
+    except psycopg.errors.QueryCanceled:
+        return {
+            "timed_out": True,
+            "elapsed_ms": (time.perf_counter() - started) * 1000,
+        }
+
+
 def time_page(
     cursor: psycopg.Cursor[Any], query: str, parameters: Sequence[Any]
-) -> tuple[float, int]:
+) -> tuple[float, int, bool]:
     started = time.perf_counter()
-    cursor.execute(query, parameters)
-    rows = cursor.fetchall()
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    return elapsed_ms, len(rows)
+    try:
+        cursor.execute(query, parameters)
+        rows = cursor.fetchall()
+        timed_out = False
+    except psycopg.errors.QueryCanceled:
+        rows = []
+        timed_out = True
+    return (time.perf_counter() - started) * 1000, len(rows), timed_out
 
 
 def benchmark_scenario(
@@ -313,14 +393,16 @@ def benchmark_scenario(
     plans: dict[str, Any] = {}
     if include_plans:
         print(f"  Capturing execution plans for {scenario.name}...", flush=True)
-        plans["page"] = explain(cursor, sql["page"], scenario.parameters)
-        plans["count"] = explain(cursor, sql["count"], scenario.parameters)
+        plans["page"] = explain_safely(cursor, sql["page"], scenario.parameters)
+        plans["count"] = explain_safely(cursor, sql["count"], scenario.parameters)
         if include_window:
-            plans["window"] = explain(cursor, sql["window"], scenario.parameters)
+            plans["window"] = explain_safely(cursor, sql["window"], scenario.parameters)
 
     timings: list[Timing] = []
     for repetition in range(1, repetitions + 1):
-        page_ms, returned = time_page(cursor, sql["page"], scenario.parameters)
+        page_ms, returned, page_timed_out = time_page(
+            cursor, sql["page"], scenario.parameters
+        )
         timings.append(
             Timing(
                 scenario.name,
@@ -331,14 +413,26 @@ def benchmark_scenario(
                 page_ms,
                 None,
                 returned,
-                False,
+                page_timed_out,
             )
         )
 
         count_started = time.perf_counter()
-        total_count = int(execute_one(cursor, sql["count"], scenario.parameters))
+        try:
+            total_count = int(execute_one(cursor, sql["count"], scenario.parameters))
+            count_timed_out = False
+        except psycopg.errors.QueryCanceled:
+            total_count = None
+            count_timed_out = True
         count_ms = (time.perf_counter() - count_started) * 1000
-        second_page_ms, returned = time_page(cursor, sql["page"], scenario.parameters)
+        if page_timed_out or count_timed_out:
+            second_page_ms = 0.0
+            second_returned = 0
+            second_page_timed_out = page_timed_out
+        else:
+            second_page_ms, second_returned, second_page_timed_out = time_page(
+                cursor, sql["page"], scenario.parameters
+            )
         timings.append(
             Timing(
                 scenario.name,
@@ -348,17 +442,22 @@ def benchmark_scenario(
                 count_ms,
                 second_page_ms,
                 total_count,
-                returned,
-                False,
+                second_returned,
+                count_timed_out or second_page_timed_out,
             )
         )
 
+        window_timed_out = False
         if include_window:
             window_started = time.perf_counter()
-            cursor.execute(sql["window"], scenario.parameters)
-            window_rows = cursor.fetchall()
+            try:
+                cursor.execute(sql["window"], scenario.parameters)
+                window_rows = cursor.fetchall()
+            except psycopg.errors.QueryCanceled:
+                window_rows = []
+                window_timed_out = True
             window_ms = (time.perf_counter() - window_started) * 1000
-            window_total = int(window_rows[0][-1]) if window_rows else 0
+            window_total = int(window_rows[0][-1]) if window_rows else None
             timings.append(
                 Timing(
                     scenario.name,
@@ -369,15 +468,28 @@ def benchmark_scenario(
                     window_ms,
                     window_total,
                     len(window_rows),
-                    False,
+                    window_timed_out,
                 )
             )
 
+        page_result = "timed out" if page_timed_out else f"{page_ms:,.1f} ms"
+        combined_timed_out = count_timed_out or second_page_timed_out
+        combined_result = (
+            "timed out"
+            if combined_timed_out
+            else f"{count_ms + second_page_ms:,.1f} ms"
+        )
         print(
-            f"  Repetition {repetition}/{repetitions}: page {page_ms:,.1f} ms, "
-            f"separate exact count {count_ms + second_page_ms:,.1f} ms",
+            f"  Repetition {repetition}/{repetitions}: page {page_result}, "
+            f"separate exact count {combined_result}",
             flush=True,
         )
+        if page_timed_out or combined_timed_out or window_timed_out:
+            print(
+                "  Stopping repetitions for this scenario after a timeout.",
+                flush=True,
+            )
+            break
     return timings, plans
 
 
@@ -528,6 +640,17 @@ def main() -> int:
         selected = [SCENARIOS["group_active"], SCENARIOS["group_overlap"]]
     elif args.start_time_suite:
         selected = [SCENARIOS["started_day"], SCENARIOS["started_month"]]
+    elif args.timescale_suite:
+        selected = [
+            SCENARIOS["primary_key"],
+            SCENARIOS["group"],
+            SCENARIOS["started_day"],
+            SCENARIOS["started_month"],
+            SCENARIOS["active"],
+            SCENARIOS["overlap"],
+            SCENARIOS["group_active"],
+            SCENARIOS["group_overlap"],
+        ]
     elif args.all_scenarios:
         selected = list(SCENARIOS.values())
     else:
@@ -546,11 +669,11 @@ def main() -> int:
             cursor.execute("SET track_io_timing = on")
             if args.work_mem:
                 cursor.execute("SELECT set_config('work_mem', %s, false)", (args.work_mem,))
+            metadata = table_metadata(cursor, args.table)
             cursor.execute(
                 "SELECT set_config('statement_timeout', %s, false)",
                 (str(statement_timeout_ms),),
             )
-            metadata = table_metadata(cursor, args.table)
             metadata["host"] = args.host
             metadata["port"] = args.port
             metadata["database"] = args.database
@@ -581,6 +704,14 @@ def main() -> int:
                     )
                 all_timings.extend(timings)
                 all_plans[scenario.name] = plans
+                checkpoint = write_results(
+                    args.output_dir,
+                    f"{args.label}_checkpoint_{scenario.name}",
+                    metadata,
+                    all_timings,
+                    all_plans,
+                )
+                print(f"  Checkpoint: {checkpoint}", flush=True)
 
     destination = write_results(
         args.output_dir,
