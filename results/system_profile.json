@@ -1,0 +1,70 @@
+{
+  "captured_at": "2026-09-05T11:19:55.6848162-04:00",
+  "operating_system": {
+    "caption": "Microsoft Windows 11 Home",
+    "version": "10.0.26200",
+    "build_number": "26200",
+    "architecture": "64-bit"
+  },
+  "cpu": {
+    "model": "12th Gen Intel(R) Core(TM) i9-12900K",
+    "sockets": 1,
+    "physical_cores": 16,
+    "logical_processors": 24,
+    "windows_reported_max_clock_mhz": 3187,
+    "l2_cache_kib": 14336,
+    "l3_cache_kib": 30720
+  },
+  "memory": {
+    "total_physical_bytes": 34088464384,
+    "total_physical_gib": 31.75,
+    "module_count": 2,
+    "modules": [
+      {
+        "capacity_bytes": 17179869184,
+        "configured_speed_mt_s": 4800,
+        "reported_speed_mt_s": 4800,
+        "manufacturer": "Corsair",
+        "part_number": "CMT32GX5M2X5600C36"
+      },
+      {
+        "capacity_bytes": 17179869184,
+        "configured_speed_mt_s": 4800,
+        "reported_speed_mt_s": 4800,
+        "manufacturer": "Corsair",
+        "part_number": "CMT32GX5M2X5600C36"
+      }
+    ]
+  },
+  "storage": {
+    "model": "Samsung SSD 970 EVO Plus 2TB",
+    "media_type": "SSD",
+    "bus_type": "NVMe",
+    "size_bytes": 2000398934016,
+    "health_status": "Healthy",
+    "operational_status": "OK",
+    "manufacturer_rated_sequential_read_mb_s": 3500,
+    "manufacturer_rated_sequential_write_mb_s": 3300,
+    "manufacturer_endurance_tbw": 1200,
+    "manufacturer_specification": "https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_EVO_Plus_Data_Sheet_Rev.3.0_10129514051212.pdf"
+  },
+  "database_volume": {
+    "drive": "C:",
+    "filesystem": "NTFS",
+    "total_bytes": 1999350599680,
+    "free_bytes_at_capture": 481425022976,
+    "free_gib_at_capture": 448.36
+  },
+  "observed_postgresql_scan": {
+    "source_result": "raw/20260905T111253-0400_unindexed_baseline.json",
+    "heap_bytes": 52178345984,
+    "heap_gib": 48.59,
+    "rows_scanned": 1000000000,
+    "data_value_count_seconds": 55.7267,
+    "data_value_effective_heap_gib_per_second": 0.8720,
+    "group_active_count_seconds": 56.3137,
+    "group_active_effective_heap_gib_per_second": 0.8629,
+    "mean_effective_heap_gib_per_second": 0.8675,
+    "note": "This is end-to-end PostgreSQL scan throughput, not a synthetic SSD benchmark. It includes predicate evaluation, parallel workers, PostgreSQL buffering, Windows filesystem caching, and physical I/O."
+  }
+}
