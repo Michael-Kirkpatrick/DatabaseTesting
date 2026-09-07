@@ -9,6 +9,41 @@ the study at full or reduced scale, see [`REPRODUCING.md`](REPRODUCING.md).
 The controlled in-place TimescaleDB experiment is documented separately in
 [`TIMESCALE_COMPARISON.md`](TIMESCALE_COMPARISON.md).
 
+## TimescaleDB comparison
+
+The one-billion-row table was benchmarked first as an ordinary PostgreSQL 18.6
+table, then converted in place to a TimescaleDB 2.29.2 hypertable with 123
+thirty-day chunks. The data, query text, logical indexes, and PostgreSQL
+settings were held constant; `timescaledb-tune` was deliberately not run.
+
+The result was strongly workload-dependent:
+
+| Query component | Ordinary table | Timescale hypertable |
+|---|---:|---:|
+| ID lookup page | 0.18 ms | 5.85 ms |
+| Start-time day page | 59.73 ms | **0.66 ms** |
+| Start-time month exact count | 496 ms | **326 ms** |
+| Active-at exact count | 143.8 s | **715 ms** |
+| Active-at page ordered by ID | **3.67 ms** | 227.1 s |
+| Month-overlap exact count | 56.98 s | **5.02 s** |
+| Month-overlap page ordered by ID | **1.84 ms** | 254.5 s |
+
+Direct `start_at` predicates pruned to one or two chunks, and smaller
+chunk-local GiST indexes greatly improved some broad counts. Conversely, ID,
+group, active-at, and overlap plans touched all 123 chunks. Temporal pages
+ordered by the unrelated global ID became catastrophically slower because the
+unbounded interval model could not safely exclude old chunks.
+
+The conclusion is not that TimescaleDB never helps: it is that time
+partitioning is a workload-specific architecture choice, not a general cure for
+queries that mention dates. The comparison also required replacing the global
+`PRIMARY KEY (id)` with a non-unique lookup index because hypertable unique keys
+must contain the time partition column.
+
+See [`TIMESCALE_COMPARISON.md`](TIMESCALE_COMPARISON.md) for reproduction steps
+and [`results/FINDINGS.md`](results/FINDINGS.md#timescaledb-in-place-comparison)
+for the complete interpretation and caveats.
+
 ## Billion-row baseline
 
 [`scripts/load_billion.py`](scripts/load_billion.py) creates a local database
